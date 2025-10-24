@@ -1,0 +1,28 @@
+services:
+  exchange-bot:
+    build: .
+    container_name: currency-exchange-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      # Persist database
+      - ./data:/app/data
+      # Persist receipts
+      - ./receipts:/app/receipts
+      - ./admin_receipts:/app/admin_receipts
+      # Persist logs
+      - ./logs:/app/logs
+    environment:
+      - DATABASE_PATH=/app/data/exchange_bot.db
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; exit(0 if os.path.exists('/app/data/exchange_bot.db') else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
