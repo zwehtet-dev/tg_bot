@@ -509,31 +509,51 @@ class DatabaseService:
                     normalized_input_bank = self.normalize_name(bank_name)
                     normalized_acc_bank = self.normalize_name(acc_bank)
                     
+                    logger.debug(f"Comparing banks: '{bank_name}' (normalized: '{normalized_input_bank}') vs '{acc_bank}' (normalized: '{normalized_acc_bank}')")
+                    
                     # Check for common bank abbreviations and variations
                     bank_aliases = {
+                        # SCB / Siam Commercial Bank variations
                         'scb': 'siamcommercialbank',
                         'siamcommercial': 'siamcommercialbank',
-                        'ktb': 'krungthai',
-                        'krungthai': 'krungthai',
-                        'krungthaibank': 'krungthai',
+                        'siamcommercialbank': 'siamcommercialbank',
+                        'siam': 'siamcommercialbank',
+                        # Krungthai variations
+                        'ktb': 'krungthaibank',
+                        'krungthai': 'krungthaibank',
+                        'krungthaibank': 'krungthaibank',
+                        # PromptPay
+                        'promptpay': 'promptpay',
+                        # Kasikorn variations
                         'kbank': 'kasikorn',
                         'kasikorn': 'kasikorn',
                         'kasikornbank': 'kasikorn',
+                        # Bangkok Bank variations
                         'bbl': 'bangkokbank',
                         'bangkok': 'bangkokbank',
+                        'bangkokbank': 'bangkokbank',
                     }
                     
-                    # Apply aliases
+                    # Apply aliases to both input and account bank
                     check_input_bank = bank_aliases.get(normalized_input_bank, normalized_input_bank)
                     check_acc_bank = bank_aliases.get(normalized_acc_bank, normalized_acc_bank)
                     
+                    logger.debug(f"After alias: '{check_input_bank}' vs '{check_acc_bank}'")
+                    
+                    # Check if banks match using multiple strategies
                     bank_matches = (
+                        # Direct match after alias resolution
                         check_input_bank == check_acc_bank or
+                        # Substring match (e.g., "scb" in "siamcommercialbank")
                         check_input_bank in check_acc_bank or
                         check_acc_bank in check_input_bank or
-                        # Also check original normalized names
+                        # Original normalized names substring match
                         normalized_input_bank in normalized_acc_bank or
-                        normalized_acc_bank in normalized_input_bank
+                        normalized_acc_bank in normalized_input_bank or
+                        # Check if input bank alias matches account bank directly
+                        check_input_bank == normalized_acc_bank or
+                        # Check if account bank alias matches input bank directly
+                        check_acc_bank == normalized_input_bank
                     )
                     
                     if name_matches and bank_matches:
