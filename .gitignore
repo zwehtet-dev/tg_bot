@@ -42,6 +42,7 @@ ENV/
 *.sqlite3
 *.md
 
+
 # Receipts
 receipts/
 admin_receipts/
