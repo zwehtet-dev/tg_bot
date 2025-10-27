@@ -17,8 +17,8 @@ class Config:
     ADMIN_GROUP_ID: str = os.getenv("ADMIN_GROUP_ID", "")
     ADMIN_TOPIC_ID: str = os.getenv("ADMIN_TOPIC_ID", "")
     
-    # Mistral AI Configuration
-    MISTRAL_API_KEY: str = os.getenv("MISTRAL_API_KEY", "")
+    # OpenAI Configuration
+    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     
     # Database Configuration
     DATABASE_PATH: str = os.getenv("DATABASE_PATH", "exchange_bot.db")
@@ -63,8 +63,8 @@ class Config:
         if not cls.TELEGRAM_BOT_TOKEN:
             errors.append("TELEGRAM_BOT_TOKEN is not set in .env file")
         
-        if not cls.MISTRAL_API_KEY:
-            errors.append("MISTRAL_API_KEY is not set in .env file")
+        if not cls.OPENAI_API_KEY:
+            errors.append("OPENAI_API_KEY is not set in .env file")
         
         if not cls.ADMIN_GROUP_ID:
             errors.append("ADMIN_GROUP_ID is not set in .env file")

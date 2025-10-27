@@ -45,7 +45,7 @@ class ExchangeBot:
         self.db_service.initialize_balances(Config.INITIAL_BALANCES)
         self.db_service.initialize_exchange_rate(Config.DEFAULT_EXCHANGE_RATE)
         
-        self.ocr_service = OCRService(Config.MISTRAL_API_KEY)
+        self.ocr_service = OCRService(Config.OPENAI_API_KEY)
         
         # Initialize handlers
         self.user_handlers = UserHandlers(self.db_service, self.ocr_service)
@@ -112,6 +112,7 @@ class ExchangeBot:
         self.application.add_handler(CommandHandler("removebank", self.admin_handlers.remove_bank_command))
         self.application.add_handler(CommandHandler("adjust", self.admin_handlers.adjust_balance_command))
         self.application.add_handler(CommandHandler("initbalance", self.admin_handlers.init_balance_command))
+        self.application.add_handler(CommandHandler("updatedisplay", self.admin_handlers.update_display_name_command))
         
         # Admin photo handler for receipts (must be before callback handlers)
         self.application.add_handler(

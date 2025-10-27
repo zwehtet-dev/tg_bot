@@ -13,26 +13,29 @@ if os.path.exists('/app/data/exchange_bot.db'):
 else:
     DB_PATH = 'data/exchange_bot.db'  # Local
 
-# Admin bank accounts to add
+# Admin bank accounts to add with initial balances
 ADMIN_ACCOUNTS = [
     # THB Accounts (Thai Baht receiving accounts)
     {
         'currency': 'THB',
         'bank_name': 'KrungthaiBank',
         'account_number': '123-4-56789-0',
-        'account_name': 'MissThinZarHtet'
+        'account_name': 'MissThinZarHtet',
+        'balance': 150000.0
     },
     {
         'currency': 'THB',
         'bank_name': 'PromptPay',
         'account_number': '123-45678901-4093',
-        'account_name': 'ThuKhaZaw'
+        'account_name': 'ThuKhaZaw',
+        'balance': 150000.0
     },
     {
         'currency': 'THB',
         'bank_name': 'SiamCommercialBank',
         'account_number': '884-2-123935',
-        'account_name': 'MinMyatNwe'
+        'account_name': 'MinMyatNwe',
+        'balance': 150000.0
     },
     
     # MMK Accounts (Myanmar Kyat sending accounts)
@@ -40,25 +43,29 @@ ADMIN_ACCOUNTS = [
         'currency': 'MMK',
         'bank_name': 'KBZ',
         'account_number': '12345678901234',
-        'account_name': 'AdminKBZ'
+        'account_name': 'AdminKBZ',
+        'balance': 1500000.0
     },
     {
         'currency': 'MMK',
         'bank_name': 'AYA',
         'account_number': '12345678901234',
-        'account_name': 'AdminAYA'
+        'account_name': 'AdminAYA',
+        'balance': 1500000.0
     },
     {
         'currency': 'MMK',
         'bank_name': 'KPay',
         'account_number': '09123456789',
-        'account_name': 'AdminKPay'
+        'account_name': 'AdminKPay',
+        'balance': 1500000.0
     },
     {
         'currency': 'MMK',
         'bank_name': 'Wave',
         'account_number': '09123456789',
-        'account_name': 'AdminWave'
+        'account_name': 'AdminWave',
+        'balance': 1500000.0
     },
 ]
 
@@ -75,13 +82,14 @@ def init_accounts():
             try:
                 cursor.execute("""
                     INSERT OR IGNORE INTO admin_bank_accounts 
-                    (currency, bank_name, account_number, account_name)
-                    VALUES (?, ?, ?, ?)
+                    (currency, bank_name, account_number, account_name, balance)
+                    VALUES (?, ?, ?, ?, ?)
                 """, (
                     account['currency'],
                     account['bank_name'],
                     account['account_number'],
-                    account['account_name']
+                    account['account_name'],
+                    account.get('balance', 0.0)
                 ))
                 
                 if cursor.rowcount > 0:
@@ -98,7 +106,7 @@ def init_accounts():
         print()
         print("📋 Current admin accounts:")
         cursor.execute("""
-            SELECT id, currency, bank_name, account_number, account_name 
+            SELECT id, currency, bank_name, account_number, account_name, balance 
             FROM admin_bank_accounts 
             WHERE is_active = 1
             ORDER BY currency, bank_name
@@ -106,7 +114,7 @@ def init_accounts():
         
         accounts = cursor.fetchall()
         for acc in accounts:
-            print(f"  ID:{acc[0]} | {acc[1]} | {acc[2]} | {acc[3]} | {acc[4]}")
+            print(f"  ID:{acc[0]} | {acc[1]} | {acc[2]} | {acc[3]} | {acc[4]} | Balance: {acc[5]:,.2f}")
         
         print()
         print(f"✅ Total: {len(accounts)} accounts initialized")

@@ -44,8 +44,9 @@ class UserHandlers:
         # Build receiving accounts section
         receiving_accounts = "💳 **Our Receiving Accounts:**\n"
         if thb_accounts:
-            for acc_id, currency, bank_name, account_number, account_name, is_active in thb_accounts:
-                receiving_accounts += f"• **{bank_name}**\n"
+            for acc_id, currency, bank_name, account_number, account_name, is_active, display_name in thb_accounts:
+                display = display_name if display_name else bank_name
+                receiving_accounts += f"• **{display}**\n"
                 receiving_accounts += f"  Account: `{account_number}`\n"
                 receiving_accounts += f"  Name: {account_name}\n\n"
         else:
@@ -149,21 +150,35 @@ Ready to exchange? Click the button below!
             )
             return self.config.UPLOAD_RECEIPT
         
-        # Validate receiver account name AND bank
+        # Validate receiver account name AND bank with fuzzy matching
         receiver_name = receipt_info.get('receiver_name')
         receiver_bank = receipt_info.get('receiver_bank')
         
         if receiver_name:
+            # Use fuzzy matching to validate receiver account
             admin_account = self.db.validate_receiver_account(receiver_name, receiver_bank, 'THB')
+            
             if not admin_account:
+                # Get all admin accounts to show in error message
+                all_accounts = self.db.get_admin_bank_accounts('THB')
+                
                 error_msg = f"❌ **Invalid Receiver Account**\n\n"
+                error_msg += f"📋 **Detected from receipt:**\n"
+                if receiver_name:
+                    error_msg += f"• Name: '{receiver_name}'\n"
                 if receiver_bank:
-                    error_msg += f"Receiver: '{receiver_name}'\nBank: '{receiver_bank}'\n\n"
-                else:
-                    error_msg += f"Receiver: '{receiver_name}'\n\n"
-                error_msg += "This doesn't match our official accounts.\n\n"
-                error_msg += "Please make sure you transferred to one of our official bank accounts.\n"
-                error_msg += "Contact admin if you need the correct account details."
+                    error_msg += f"• Bank: '{receiver_bank}'\n"
+                error_msg += f"\n"
+                error_msg += f"⚠️ This doesn't match our official accounts.\n\n"
+                
+                if all_accounts:
+                    error_msg += f"✅ **Our Official Accounts:**\n"
+                    for acc in all_accounts[:3]:  # Show first 3 accounts
+                        error_msg += f"• {acc[2]} - {acc[4]}\n"  # bank_name - account_name
+                    error_msg += f"\n"
+                
+                error_msg += f"Please make sure you transferred to one of our official accounts.\n"
+                error_msg += f"If you believe this is an error, contact admin."
                 
                 await self._send_message_with_retry(processing_msg.edit_text, error_msg)
                 return self.config.UPLOAD_RECEIPT
@@ -171,7 +186,11 @@ Ready to exchange? Click the button below!
             # Store validated admin bank info
             context.user_data['admin_thb_bank'] = admin_account[1]  # bank_name
             context.user_data['admin_account_validated'] = True
-            logger.info(f"Receipt validated: {receiver_name} at {admin_account[1]}")
+            
+            # Log successful validation with similarity info
+            matched_name = admin_account[3]  # account_name
+            matched_bank = admin_account[1]  # bank_name
+            logger.info(f"Receipt validated (fuzzy): '{receiver_name}' at '{receiver_bank}' → matched {matched_name} at {matched_bank}")
         
         # Check if amount is detected
         if receipt_info.get('amount'):
@@ -179,19 +198,28 @@ Ready to exchange? Click the button below!
             rate = self.db.get_current_rate()
             mmk_amount = float(receipt_info['amount']) * rate
             
-            success_message = (
-                f"✅ **Receipt Processed Successfully!**\n\n"
-                f"💰 Amount detected: **{receipt_info['amount']} THB**\n"
-                f"📊 You will receive: **{mmk_amount:,.0f} MMK**\n"
-                f"📈 Rate: 1 THB = {rate} MMK\n\n"
-                f"📝 **Step 2: Enter Your MMK Bank Details**\n\n"
-                f"Please provide your receiving account information:\n\n"
-                f"**Format:**\n"
-                f"`Bank Name | Account Number | Account Name`\n\n"
-                f"**Example:**\n"
-                f"`AYA | 00987654321 | AUNG AUNG`\n\n"
-                f"**Supported Banks:** KBZ, AYA, CB Bank, KPay, Wave Money"
-            )
+            # Build success message with detected info
+            success_message = f"✅ **Receipt Processed Successfully!**\n\n"
+            success_message += f"💰 Amount detected: **{receipt_info['amount']} THB**\n"
+            success_message += f"📊 You will receive: **{mmk_amount:,.0f} MMK**\n"
+            success_message += f"📈 Rate: 1 THB = {rate} MMK\n\n"
+            
+            # Show what was detected from receipt
+            if receiver_name or receiver_bank:
+                success_message += f"📋 **Verified Transfer To:**\n"
+                if receiver_name:
+                    success_message += f"• {receiver_name}\n"
+                if receiver_bank:
+                    success_message += f"• {receiver_bank}\n"
+                success_message += f"\n"
+            
+            success_message += f"📝 **Step 2: Enter Your MMK Bank Details**\n\n"
+            success_message += f"Please provide your receiving account information:\n\n"
+            success_message += f"**Format:**\n"
+            success_message += f"`Bank Name | Account Number | Account Name`\n\n"
+            success_message += f"**Example:**\n"
+            success_message += f"`AYA | 00987654321 | AUNG AUNG`\n\n"
+            success_message += f"**Supported Banks:** KBZ, AYA, CB Bank, KPay, Wave Money"
             
             # Try to edit message with retry logic
             await self._send_message_with_retry(
@@ -360,7 +388,7 @@ Ready to exchange? Click the button below!
     async def _notify_admin(self, context, transaction_id, user, thb_amount, 
                            mmk_amount, rate, bank_name, account_number, 
                            account_name, from_bank):
-        """Notify admin group about new transaction"""
+        """Notify admin group about new transaction with receipt photo"""
         admin_message = f"""Buy {thb_amount} × {rate} = **{mmk_amount:,.0f}**
 
 👤 **User:** @{user.username or user.first_name} (ID: {user.id})
@@ -387,23 +415,59 @@ Name: {account_name}
             admin_group_id = self.db.get_setting('admin_group_id') or self.config.ADMIN_GROUP_ID
             admin_topic_id = self.db.get_setting('admin_topic_id') or self.config.ADMIN_TOPIC_ID
             
-            if admin_topic_id:
-                await self._send_message_with_retry(
-                    context.bot.send_message,
-                    chat_id=admin_group_id,
-                    text=admin_message,
-                    message_thread_id=int(admin_topic_id),
-                    reply_markup=reply_markup,
-                    parse_mode='Markdown'
-                )
+            # Get receipt path from transaction in database
+            transaction = self.db.get_transaction(transaction_id)
+            receipt_path = transaction[3] if transaction else None  # receipt_path is at index 3
+            
+            logger.info(f"Notifying admin for transaction #{transaction_id}, receipt_path: {receipt_path}")
+            
+            if receipt_path:
+                logger.info(f"Receipt path exists check: {os.path.exists(receipt_path)}")
+                if not os.path.exists(receipt_path):
+                    logger.warning(f"Receipt file not found at: {receipt_path}")
+            
+            if receipt_path and os.path.exists(receipt_path):
+                logger.info(f"Sending notification WITH photo")
+                # Send with photo
+                if admin_topic_id:
+                    await self._send_message_with_retry(
+                        context.bot.send_photo,
+                        chat_id=admin_group_id,
+                        photo=open(receipt_path, 'rb'),
+                        caption=admin_message,
+                        message_thread_id=int(admin_topic_id),
+                        reply_markup=reply_markup,
+                        parse_mode='Markdown'
+                    )
+                else:
+                    await self._send_message_with_retry(
+                        context.bot.send_photo,
+                        chat_id=admin_group_id,
+                        photo=open(receipt_path, 'rb'),
+                        caption=admin_message,
+                        reply_markup=reply_markup,
+                        parse_mode='Markdown'
+                    )
             else:
-                await self._send_message_with_retry(
-                    context.bot.send_message,
-                    chat_id=admin_group_id,
-                    text=admin_message,
-                    reply_markup=reply_markup,
-                    parse_mode='Markdown'
-                )
+                # Send without photo (fallback)
+                logger.info(f"Sending notification WITHOUT photo (receipt_path: {receipt_path})")
+                if admin_topic_id:
+                    await self._send_message_with_retry(
+                        context.bot.send_message,
+                        chat_id=admin_group_id,
+                        text=admin_message,
+                        message_thread_id=int(admin_topic_id),
+                        reply_markup=reply_markup,
+                        parse_mode='Markdown'
+                    )
+                else:
+                    await self._send_message_with_retry(
+                        context.bot.send_message,
+                        chat_id=admin_group_id,
+                        text=admin_message,
+                        reply_markup=reply_markup,
+                        parse_mode='Markdown'
+                    )
         except Exception as e:
             logger.error(f"Error sending to admin: {e}")
     

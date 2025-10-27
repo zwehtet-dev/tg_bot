@@ -41,13 +41,15 @@ class AdminHandlers:
         message = "💰 **Current Bank Balances:**\n\n"
         
         current_currency = None
-        for currency, bank, balance in balances:
+        for currency, bank, balance, display_name in balances:
             if currency != current_currency:
                 if current_currency is not None:
                     message += "\n"
                 message += f"**{currency}:**\n"
                 current_currency = currency
-            message += f"• {bank}: {balance:,.2f}\n"
+            # Use display_name if available, otherwise fall back to bank name
+            display = display_name if display_name else 'No Display Name'
+            message += f"• {display}: {balance:,.2f}\n"
         
         await update.message.reply_text(message, parse_mode='Markdown')
     
@@ -113,17 +115,21 @@ class AdminHandlers:
         """Handle admin receipt photo upload"""
         # Check if this is a reply to a transaction message
         if not update.message.reply_to_message:
+            logger.debug("No reply_to_message found, skipping")
             return
         
-        # Extract transaction ID from the replied message
-        replied_text = update.message.reply_to_message.text
-        if "Transaction ID:" not in replied_text and "Buy" not in replied_text:
+        # Extract transaction ID from the replied message (could be text or caption)
+        replied_text = update.message.reply_to_message.text or update.message.reply_to_message.caption
+        logger.info(f"Admin receipt handler triggered. Replied text: {replied_text[:100] if replied_text else 'None'}")
+        
+        if not replied_text or ("Transaction ID:" not in replied_text and "Buy" not in replied_text):
+            logger.debug("Message doesn't contain transaction markers, skipping")
             return
         
         # Try to extract transaction ID from message
         transaction_id = None
         
-        # Check if message has callback data stored
+        # Method 1: Try to extract from inline keyboard (Cancel button)
         if hasattr(update.message.reply_to_message, 'reply_markup') and update.message.reply_to_message.reply_markup:
             # Extract from cancel button callback data
             for row in update.message.reply_to_message.reply_markup.inline_keyboard:
@@ -131,6 +137,20 @@ class AdminHandlers:
                     if button.callback_data and button.callback_data.startswith('cancel_'):
                         transaction_id = int(button.callback_data.split('_')[1])
                         break
+        
+        # Method 2: If not found in keyboard, try to extract from message text
+        # Look for pattern like "Transaction ID: #123" or just find the user ID and timestamp
+        if not transaction_id and replied_text:
+            # Try to find user ID in the message (format: "ID: 123456")
+            import re
+            user_id_match = re.search(r'ID:\s*(\d+)', replied_text)
+            if user_id_match:
+                user_id = int(user_id_match.group(1))
+                # Get the most recent pending transaction for this user
+                recent_txn = self.db.get_user_recent_pending_transaction(user_id)
+                if recent_txn:
+                    transaction_id = recent_txn[0]  # transaction ID is first column
+                    logger.info(f"Found transaction #{transaction_id} for user {user_id} from message text")
         
         if not transaction_id:
             await update.message.reply_text("❌ Could not identify transaction. Please reply to the transaction message.")
@@ -142,8 +162,16 @@ class AdminHandlers:
             await update.message.reply_text("❌ Transaction not found.")
             return
         
-        if transaction[14] != 'pending':  # status column
-            await update.message.reply_text(f"❌ Transaction #{transaction_id} is already {transaction[14]}.")
+        # Check if transaction is already confirmed (not just pending)
+        # Column indices: 0=id, 1=user_id, 2=username, 3=receipt_path, 4=admin_receipt_path,
+        # 5=from_bank, 6=to_bank, 7=thb_amount, 8=mmk_amount, 9=rate, 10=user_bank_name,
+        # 11=user_account_number, 12=user_account_name, 13=admin_bank, 14=admin_thb_bank, 15=status
+        status = transaction[15]  # status column (16th column, index 15)
+        if status == 'confirmed':
+            await update.message.reply_text(f"❌ Transaction #{transaction_id} is already confirmed.")
+            return
+        elif status == 'cancelled':
+            await update.message.reply_text(f"❌ Transaction #{transaction_id} has been cancelled.")
             return
         
         # Download admin receipt photo with retry logic for network timeouts
@@ -187,18 +215,19 @@ class AdminHandlers:
         
         # Build dynamic keyboard from database
         keyboard = []
-        for acc_id, currency, bank_name, account_number, account_name, is_active in mmk_accounts:
+        for acc_id, currency, bank_name, account_number, account_name, is_active, display_name in mmk_accounts:
+            display = display_name if display_name else bank_name
             keyboard.append([InlineKeyboardButton(
-                f"{bank_name}", 
+                f"{display}", 
                 callback_data=f"bank_{bank_name}_{transaction_id}"
             )])
         
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         # Get transaction details for display
-        thb_amount = transaction[6]
-        mmk_amount = transaction[7]
-        user_bank = transaction[9]
+        thb_amount = transaction[7]  # thb_amount at index 7
+        mmk_amount = transaction[8]  # mmk_amount at index 8
+        user_bank = transaction[10]  # user_bank_name at index 10
         
         await update.message.reply_text(
             f"✅ **Receipt saved for Transaction #{transaction_id}**\n\n"
@@ -226,10 +255,11 @@ class AdminHandlers:
             await query.edit_message_text("❌ Transaction not found.")
             return
         
-        mmk_amount = transaction[7]  # mmk_amount column
-        thb_amount = transaction[6]  # thb_amount column
+        # Correct column indices based on actual schema
         user_id = transaction[1]
-        admin_thb_bank = transaction[13]  # admin_thb_bank column
+        thb_amount = transaction[7]  # thb_amount column (index 7)
+        mmk_amount = transaction[8]  # mmk_amount column (index 8)
+        admin_thb_bank = transaction[14]  # admin_thb_bank column (index 14)
         
         # Get balances before update
         balances_before = self.db.get_balances()
@@ -374,8 +404,15 @@ Transaction #{transaction_id} cannot be processed
                     message_thread_id=int(balance_topic_id),
                     parse_mode='Markdown'
                 )
+                logger.info(f"Balance update sent to topic {balance_topic_id}")
             else:
-                logger.warning("Balance topic ID not configured")
+                # Send to main admin group if no balance topic configured
+                logger.warning("Balance topic ID not configured, sending to main admin group")
+                await context.bot.send_message(
+                    chat_id=admin_group_id,
+                    text=balance_message,
+                    parse_mode='Markdown'
+                )
         except Exception as e:
             logger.error(f"Error sending balance update: {e}")
     
@@ -458,12 +495,13 @@ Transaction #{transaction_id} cannot be processed
             message = """🏦 **Add Admin Bank Account**
 
 **Usage:**
-`/addbank <currency> <bank_name> <account_number> <account_name>`
+`/addbank <currency> <bank_name> <account_number> <account_name> [display_name]`
 
 **Example:**
-`/addbank THB KBank 1234567890 COMPANY NAME`
-`/addbank MMK KBZ 0987654321 COMPANY NAME`
+`/addbank THB KrungthaiBank 1234567890 COMPANY_NAME TZH_(K_Bank)`
+`/addbank MMK KBZ 0987654321 COMPANY_NAME`
 
+**Note:** Display name is optional and will be shown in balance reports
 **Supported Currencies:** THB, MMK
 """
             await update.message.reply_text(message, parse_mode='Markdown')
@@ -472,22 +510,37 @@ Transaction #{transaction_id} cannot be processed
         currency = context.args[0].upper()
         bank_name = context.args[1]
         account_number = context.args[2]
-        account_name = ' '.join(context.args[3:])
+        
+        # Find where account_name ends and display_name begins
+        # Look for a parameter that looks like a display name (contains parentheses or underscores)
+        remaining_args = context.args[3:]
+        account_name_parts = []
+        display_name = None
+        
+        for i, arg in enumerate(remaining_args):
+            # If arg contains parentheses or looks like a code, treat it as display_name
+            if '(' in arg or '_' in arg or (len(arg) <= 5 and arg.isupper()):
+                display_name = ' '.join(remaining_args[i:])
+                break
+            account_name_parts.append(arg)
+        
+        account_name = ' '.join(account_name_parts) if account_name_parts else remaining_args[0]
         
         if currency not in ['THB', 'MMK']:
             await update.message.reply_text("❌ Currency must be THB or MMK")
             return
         
-        self.db.add_admin_bank_account(currency, bank_name, account_number, account_name)
+        self.db.add_admin_bank_account(currency, bank_name, account_number, account_name, display_name)
         
-        await update.message.reply_text(
-            f"✅ **Admin Bank Account Added**\n\n"
-            f"Currency: {currency}\n"
-            f"Bank: {bank_name}\n"
-            f"Account: {account_number}\n"
-            f"Name: {account_name}",
-            parse_mode='Markdown'
-        )
+        response = f"✅ **Admin Bank Account Added**\n\n"
+        response += f"Currency: {currency}\n"
+        response += f"Bank: {bank_name}\n"
+        response += f"Account: {account_number}\n"
+        response += f"Name: {account_name}\n"
+        if display_name:
+            response += f"Display Name: {display_name}\n"
+        
+        await update.message.reply_text(response, parse_mode='Markdown')
     
     @admin_only
     async def list_banks_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -507,7 +560,7 @@ Transaction #{transaction_id} cannot be processed
         message = "🏦 **Admin Bank Accounts:**\n\n"
         
         current_currency = None
-        for acc_id, currency, bank_name, account_number, account_name, is_active in accounts:
+        for acc_id, currency, bank_name, account_number, account_name, is_active, display_name in accounts:
             if currency != current_currency:
                 if current_currency is not None:
                     message += "\n"
@@ -515,7 +568,8 @@ Transaction #{transaction_id} cannot be processed
                 current_currency = currency
             
             status = "✅" if is_active else "❌"
-            message += f"{status} ID:{acc_id} | {bank_name}\n"
+            display = f"{display_name} ({bank_name})" if display_name else bank_name
+            message += f"{status} ID:{acc_id} | {display}\n"
             message += f"   {account_number} - {account_name}\n"
         
         message += f"\n**Deactivate:** `/removebank <id>`"
@@ -638,3 +692,40 @@ Transaction #{transaction_id} cannot be processed
             )
         except ValueError:
             await update.message.reply_text("❌ Invalid amount format")
+
+    @admin_only
+    async def update_display_name_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Update display name for a bank account (admin only)"""
+        if len(context.args) < 2:
+            message = """🏷️ **Update Bank Display Name**
+
+**Usage:**
+`/updatedisplay <account_id> <display_name>`
+
+**Examples:**
+`/updatedisplay 1 TZH (K Bank)`
+`/updatedisplay 2 TKZ (PP)`
+`/updatedisplay 3 MMN (SCB)`
+
+**Note:** Use `/listbanks` to see account IDs
+"""
+            await update.message.reply_text(message, parse_mode='Markdown')
+            return
+        
+        try:
+            account_id = int(context.args[0])
+            display_name = ' '.join(context.args[1:])
+            
+            success = self.db.update_bank_display_name(account_id, display_name)
+            
+            if success:
+                await update.message.reply_text(
+                    f"✅ **Display Name Updated**\n\n"
+                    f"Account ID: {account_id}\n"
+                    f"New Display Name: {display_name}",
+                    parse_mode='Markdown'
+                )
+            else:
+                await update.message.reply_text(f"❌ Account #{account_id} not found")
+        except ValueError:
+            await update.message.reply_text("❌ Invalid account ID")

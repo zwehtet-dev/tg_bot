@@ -33,18 +33,6 @@ class DatabaseService:
         cursor = conn.cursor()
         
         try:
-            # Create balances table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS balances (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    currency TEXT NOT NULL,
-                    bank TEXT NOT NULL,
-                    balance REAL NOT NULL,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(currency, bank)
-                )
-            """)
-            
             # Create transactions table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS transactions (
@@ -88,7 +76,7 @@ class DatabaseService:
                 )
             """)
             
-            # Create admin_bank_accounts table
+            # Create admin_bank_accounts table with balance
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS admin_bank_accounts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -96,11 +84,34 @@ class DatabaseService:
                     bank_name TEXT NOT NULL,
                     account_number TEXT NOT NULL,
                     account_name TEXT NOT NULL,
+                    balance REAL DEFAULT 0.0,
                     is_active INTEGER DEFAULT 1,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     UNIQUE(currency, bank_name, account_number)
                 )
             """)
+            
+            # Add balance column to existing admin_bank_accounts if it doesn't exist
+            try:
+                cursor.execute("ALTER TABLE admin_bank_accounts ADD COLUMN balance REAL DEFAULT 0.0")
+                logger.info("Added balance column to admin_bank_accounts")
+            except:
+                pass  # Column already exists
+            
+            # Add display_name column to existing admin_bank_accounts if it doesn't exist
+            try:
+                cursor.execute("ALTER TABLE admin_bank_accounts ADD COLUMN display_name TEXT")
+                logger.info("Added display_name column to admin_bank_accounts")
+            except:
+                pass  # Column already exists
+            
+            # Add updated_at column if it doesn't exist
+            try:
+                cursor.execute("ALTER TABLE admin_bank_accounts ADD COLUMN updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP")
+                logger.info("Added updated_at column to admin_bank_accounts")
+            except:
+                pass  # Column already exists
             
             conn.commit()
             logger.info("Database tables created successfully")
@@ -112,19 +123,22 @@ class DatabaseService:
             conn.close()
     
     def initialize_balances(self, initial_balances: List[Tuple[str, str, float]]):
-        """Initialize balances if empty"""
+        """Initialize balances in admin_bank_accounts if needed (only if balance is NULL or 0)"""
         conn = self.get_connection()
         cursor = conn.cursor()
         
         try:
-            cursor.execute("SELECT COUNT(*) FROM balances")
-            if cursor.fetchone()[0] == 0:
-                cursor.executemany(
-                    "INSERT INTO balances (currency, bank, balance) VALUES (?, ?, ?)",
-                    initial_balances
-                )
-                conn.commit()
-                logger.info("Initial balances set successfully")
+            # Only update balances for accounts that have NULL or 0 balance
+            for currency, bank, balance in initial_balances:
+                cursor.execute("""
+                    UPDATE admin_bank_accounts 
+                    SET balance = ?, updated_at = ?
+                    WHERE currency = ? AND bank_name = ? 
+                    AND (balance IS NULL OR balance = 0)
+                """, (balance, datetime.now(), currency, bank))
+            
+            conn.commit()
+            logger.info("Initial balances set successfully in admin_bank_accounts (only for NULL/0 balances)")
         except Exception as e:
             logger.error(f"Error initializing balances: {e}")
             conn.rollback()
@@ -181,13 +195,18 @@ class DatabaseService:
         finally:
             conn.close()
     
-    def get_balances(self) -> List[Tuple[str, str, float]]:
-        """Get all balances"""
+    def get_balances(self) -> List[Tuple[str, str, float, str]]:
+        """Get all balances from admin_bank_accounts"""
         conn = self.get_connection()
         cursor = conn.cursor()
         
         try:
-            cursor.execute("SELECT currency, bank, balance FROM balances ORDER BY currency, bank")
+            cursor.execute("""
+                SELECT currency, bank_name, balance, display_name
+                FROM admin_bank_accounts 
+                WHERE is_active = 1
+                ORDER BY currency, bank_name
+            """)
             return cursor.fetchall()
         except Exception as e:
             logger.error(f"Error getting balances: {e}")
@@ -202,7 +221,7 @@ class DatabaseService:
         
         try:
             cursor.execute(
-                "UPDATE balances SET balance = balance + ?, updated_at = ? WHERE currency = ? AND bank = ?",
+                "UPDATE admin_bank_accounts SET balance = balance + ?, updated_at = ? WHERE currency = ? AND bank_name = ?",
                 (amount_change, datetime.now(), currency, bank)
             )
             conn.commit()
@@ -353,7 +372,8 @@ class DatabaseService:
     
     # Admin Bank Account Methods
     def add_admin_bank_account(self, currency: str, bank_name: str, 
-                               account_number: str, account_name: str):
+                               account_number: str, account_name: str,
+                               display_name: Optional[str] = None):
         """Add admin bank account"""
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -361,9 +381,9 @@ class DatabaseService:
         try:
             cursor.execute("""
                 INSERT INTO admin_bank_accounts 
-                (currency, bank_name, account_number, account_name)
-                VALUES (?, ?, ?, ?)
-            """, (currency, bank_name, account_number, account_name))
+                (currency, bank_name, account_number, account_name, display_name)
+                VALUES (?, ?, ?, ?, ?)
+            """, (currency, bank_name, account_number, account_name, display_name))
             conn.commit()
             logger.info(f"Admin bank account added: {bank_name} - {account_number}")
         except sqlite3.IntegrityError:
@@ -382,14 +402,14 @@ class DatabaseService:
         try:
             if currency:
                 cursor.execute("""
-                    SELECT id, currency, bank_name, account_number, account_name, is_active
+                    SELECT id, currency, bank_name, account_number, account_name, is_active, display_name
                     FROM admin_bank_accounts 
                     WHERE currency = ? AND is_active = 1
                     ORDER BY bank_name
                 """, (currency,))
             else:
                 cursor.execute("""
-                    SELECT id, currency, bank_name, account_number, account_name, is_active
+                    SELECT id, currency, bank_name, account_number, account_name, is_active, display_name
                     FROM admin_bank_accounts 
                     WHERE is_active = 1
                     ORDER BY currency, bank_name
@@ -402,7 +422,7 @@ class DatabaseService:
             conn.close()
     
     def normalize_name(self, name: str) -> str:
-        """Normalize name for comparison (remove spaces, lowercase, remove prefixes)"""
+        """Normalize name for comparison (remove spaces, lowercase, remove prefixes and special chars)"""
         if not name:
             return ""
         
@@ -419,6 +439,10 @@ class DatabaseService:
             elif normalized.startswith(prefix + '.'):
                 normalized = normalized[len(prefix) + 1:].strip()
                 break
+        
+        # Remove special characters and extra spaces
+        # Keep only alphanumeric characters
+        normalized = ''.join(c for c in normalized if c.isalnum() or c.isspace())
         
         # Remove all spaces and return
         return ''.join(normalized.split())
@@ -488,7 +512,7 @@ class DatabaseService:
             # Second pass: fuzzy match (for OCR errors)
             best_match = None
             best_similarity = 0.0
-            similarity_threshold = 0.85  # 85% similarity required
+            similarity_threshold = 0.80  # 80% similarity required (more lenient for OCR errors)
             
             for account in accounts:
                 acc_id, acc_bank, acc_number, acc_name = account
@@ -497,12 +521,18 @@ class DatabaseService:
                 # Calculate name similarity
                 name_similarity = self.calculate_similarity(account_name, acc_name)
                 
+                # Log comparison for debugging
+                logger.debug(f"Comparing names: '{account_name}' vs '{acc_name}' → similarity: {name_similarity:.2%}")
+                
                 # Check if names match exactly
                 exact_name_match = normalized_input_name == normalized_acc_name
                 # Or if similarity is high enough (handles OCR errors like MWE vs NWE)
                 fuzzy_name_match = name_similarity >= similarity_threshold
                 
                 name_matches = exact_name_match or fuzzy_name_match
+                
+                if name_matches:
+                    logger.debug(f"✓ Name matched: {account_name} → {acc_name} ({name_similarity:.2%})")
                 
                 # If bank name is provided, also check bank
                 if bank_name:
@@ -556,17 +586,28 @@ class DatabaseService:
                         check_acc_bank == normalized_input_bank
                     )
                     
-                    if name_matches and bank_matches:
-                        # Track best match for fuzzy matching
-                        if name_similarity > best_similarity:
-                            best_similarity = name_similarity
+                    # Flexible matching: accept if name matches well, even if bank doesn't match perfectly
+                    # This handles cases where OCR misreads the bank name
+                    if name_matches:
+                        # Calculate match score
+                        match_score = name_similarity
+                        if bank_matches:
+                            match_score += 0.1  # Bonus for bank match
+                        
+                        # Track best match
+                        if match_score > best_similarity:
+                            best_similarity = match_score
                             best_match = account
                         
-                        # If exact match, return immediately
+                        # If exact name match, return immediately (even if bank doesn't match)
                         if exact_name_match:
-                            logger.info(f"Validated (exact): '{account_name}' at '{bank_name}' matches {acc_name} at {acc_bank}")
+                            if bank_matches:
+                                logger.info(f"Validated (exact): '{account_name}' at '{bank_name}' matches {acc_name} at {acc_bank}")
+                            else:
+                                logger.info(f"Validated (name only): '{account_name}' matches {acc_name} (bank mismatch: '{bank_name}' vs '{acc_bank}')")
                             return account
                 else:
+                    # No bank name provided - match on name only
                     if name_matches:
                         # Track best match for fuzzy matching
                         if name_similarity > best_similarity:
@@ -575,7 +616,7 @@ class DatabaseService:
                         
                         # If exact match, return immediately
                         if exact_name_match:
-                            logger.info(f"Validated (exact): '{account_name}' matches {acc_name}")
+                            logger.info(f"Validated (exact, no bank): '{account_name}' matches {acc_name}")
                             return account
             
             # Return best fuzzy match if found
@@ -659,19 +700,22 @@ class DatabaseService:
             conn.close()
 
     def set_balance(self, currency: str, bank: str, new_balance: float):
-        """Set balance for a specific bank (for initialization/adjustment)"""
+        """Set balance for a specific bank in admin_bank_accounts"""
         conn = self.get_connection()
         cursor = conn.cursor()
         
         try:
             cursor.execute("""
-                INSERT INTO balances (currency, bank, balance, updated_at)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT(currency, bank) DO UPDATE SET 
-                balance = ?, updated_at = ?
-            """, (currency, bank, new_balance, datetime.now(), new_balance, datetime.now()))
-            conn.commit()
-            logger.info(f"Balance set: {currency} {bank} = {new_balance:.2f}")
+                UPDATE admin_bank_accounts 
+                SET balance = ?, updated_at = ?
+                WHERE currency = ? AND bank_name = ?
+            """, (new_balance, datetime.now(), currency, bank))
+            
+            if cursor.rowcount == 0:
+                logger.warning(f"No account found for {currency} {bank}")
+            else:
+                conn.commit()
+                logger.info(f"Balance set: {currency} {bank} = {new_balance:.2f}")
         except Exception as e:
             logger.error(f"Error setting balance: {e}")
             conn.rollback()
@@ -679,13 +723,13 @@ class DatabaseService:
             conn.close()
     
     def get_balance(self, currency: str, bank: str) -> float:
-        """Get balance for a specific bank"""
+        """Get balance for a specific bank from admin_bank_accounts"""
         conn = self.get_connection()
         cursor = conn.cursor()
         
         try:
             cursor.execute(
-                "SELECT balance FROM balances WHERE currency = ? AND bank = ?",
+                "SELECT balance FROM admin_bank_accounts WHERE currency = ? AND bank_name = ?",
                 (currency, bank)
             )
             result = cursor.fetchone()
@@ -693,5 +737,50 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"Error getting balance: {e}")
             return 0.0
+        finally:
+            conn.close()
+
+    def get_user_recent_pending_transaction(self, user_id: int) -> Optional[Tuple]:
+        """Get the most recent pending transaction for a user"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute("""
+                SELECT * FROM transactions 
+                WHERE user_id = ? AND status = 'pending'
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (user_id,))
+            return cursor.fetchone()
+        except Exception as e:
+            logger.error(f"Error getting recent pending transaction for user {user_id}: {e}")
+            return None
+        finally:
+            conn.close()
+
+    def update_bank_display_name(self, account_id: int, display_name: str):
+        """Update display name for a bank account"""
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute("""
+                UPDATE admin_bank_accounts 
+                SET display_name = ?, updated_at = ?
+                WHERE id = ?
+            """, (display_name, datetime.now(), account_id))
+            
+            if cursor.rowcount == 0:
+                logger.warning(f"No account found with ID {account_id}")
+                return False
+            else:
+                conn.commit()
+                logger.info(f"Display name updated for account #{account_id}: {display_name}")
+                return True
+        except Exception as e:
+            logger.error(f"Error updating display name: {e}")
+            conn.rollback()
+            return False
         finally:
             conn.close()

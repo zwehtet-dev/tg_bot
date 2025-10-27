@@ -1,5 +1,5 @@
 """
-OCR service for receipt processing using Mistral AI Vision
+OCR service for receipt processing using OpenAI Vision with LangChain
 """
 import base64
 import json
@@ -12,22 +12,32 @@ logger = logging.getLogger(__name__)
 
 
 class OCRService:
-    """Handle OCR operations using Mistral AI Vision"""
+    """Handle OCR operations using OpenAI Vision with LangChain"""
     
     def __init__(self, api_key: str):
         """
         Initialize OCR service
         
         Args:
-            api_key: Mistral AI API key
+            api_key: OpenAI API key
         """
         try:
-            from mistralai import Mistral
-            self.api_key = api_key  # Store API key for direct HTTP calls
-            self.client = Mistral(api_key=api_key)
-            logger.info("OCR Service initialized successfully")
-        except ImportError:
-            logger.error("mistralai package not installed. Run: pip install mistralai")
+            from langchain_openai import ChatOpenAI
+            from langchain.schema import HumanMessage
+            
+            self.api_key = api_key
+            # Initialize LangChain ChatOpenAI with vision model
+            self.llm = ChatOpenAI(
+                model="gpt-4o-mini",  # GPT-4o-mini supports vision and is cost-effective
+                api_key=api_key,
+                temperature=0,  # Deterministic output for structured data
+                max_tokens=1000
+            )
+            self.HumanMessage = HumanMessage
+            logger.info("OCR Service initialized successfully with OpenAI GPT-4o-mini")
+        except ImportError as e:
+            logger.error(f"Required packages not installed: {e}")
+            logger.error("Run: pip install openai langchain langchain-openai")
             raise
         except Exception as e:
             logger.error(f"Error initializing OCR service: {e}")
@@ -35,7 +45,7 @@ class OCRService:
     
     def image_to_base64(self, image_path: str) -> str:
         """
-        Convert image to base64 for Mistral AI Vision
+        Convert image to base64 for OpenAI Vision
         
         Args:
             image_path: Path to image file
@@ -49,12 +59,12 @@ class OCRService:
                 if img.mode in ('RGBA', 'LA', 'P'):
                     img = img.convert('RGB')
                 
-                # Resize if too large
-                max_size = (1024, 1024)
+                # Resize if too large (OpenAI recommends max 2048x2048)
+                max_size = (2048, 2048)
                 img.thumbnail(max_size, Image.Resampling.LANCZOS)
                 
                 buffered = io.BytesIO()
-                img.save(buffered, format="JPEG", quality=85)
+                img.save(buffered, format="JPEG", quality=90)
                 return base64.b64encode(buffered.getvalue()).decode()
         except Exception as e:
             logger.error(f"Error converting image to base64: {e}")
@@ -62,7 +72,7 @@ class OCRService:
     
     def extract_receipt_info(self, image_path: str) -> Optional[Dict]:
         """
-        Extract information from receipt using Mistral AI Vision
+        Extract information from receipt using OpenAI Vision with LangChain
         
         Args:
             image_path: Path to receipt image
@@ -74,16 +84,22 @@ class OCRService:
             image_base64 = self.image_to_base64(image_path)
             
             # Construct the prompt
-            prompt = """Analyze this Thai bank transfer receipt and extract:
-1. Transfer amount (in THB)
-2. Sender bank name
-3. Receiver bank name
-4. Sender account name
-5. Receiver account name
-6. Transaction status (successful/pending/failed)
+            prompt_text = """Analyze this Thai bank transfer receipt and extract the following information:
+
+1. Transfer amount (in THB) - extract only the number
+2. Sender bank name - the bank sending the money
+3. Receiver bank name - the bank receiving the money
+4. Sender account name - the person/account sending money
+5. Receiver account name - the person/account receiving money
+6. Transaction status - whether it's successful, pending, or failed
 7. Transaction reference number
 
-Return ONLY valid JSON format:
+Important:
+- For bank names, use common abbreviations if visible (e.g., SCB, KTB, KBank)
+- For names, extract exactly as shown (including titles like MISS, MR, etc.)
+- For amount, extract only the numeric value
+
+Return ONLY valid JSON format with no additional text:
 {
     "amount": <number or null>,
     "sender_bank": "<bank name or null>",
@@ -94,43 +110,26 @@ Return ONLY valid JSON format:
     "reference": "<ref or null>"
 }"""
             
-            # Use direct HTTP API call for vision support
-            import requests
-            
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
-            }
-            
-            payload = {
-                "model": "pixtral-12b-2409",
-                "messages": [
+            # Create message with image using LangChain
+            message = self.HumanMessage(
+                content=[
                     {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": prompt
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": f"data:image/jpeg;base64,{image_base64}"
-                            }
-                        ]
+                        "type": "text",
+                        "text": prompt_text
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{image_base64}",
+                            "detail": "high"  # Use high detail for better OCR
+                        }
                     }
                 ]
-            }
-            
-            response = requests.post(
-                "https://api.mistral.ai/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=30
             )
             
-            response.raise_for_status()
-            result = response.json()
-            content = result['choices'][0]['message']['content']
+            # Invoke the model
+            response = self.llm.invoke([message])
+            content = response.content
             
             # Try to parse JSON from response
             # Sometimes the model returns markdown code blocks
